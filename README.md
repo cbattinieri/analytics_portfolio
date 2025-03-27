@@ -6,3 +6,4 @@
 - NHL Points Prediction Model: Iterative linear regression models that use future feature assumptions to predict NHL players career trajectory
 - Shiny App Link: https://cbatt.shinyapps.io/gm_app/
 - NHL Arbitration Study to understand pros & cons of teams/players electing to excercise their arbitration rights
+- Tableau Storytelling: Industry example of Data Viz and Data Storytelling skills
