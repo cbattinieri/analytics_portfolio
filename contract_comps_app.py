@@ -152,7 +152,7 @@ for columns in for_columns:
     
 ###### import CONTRACTS
 ####################################
-api_key = "7cbd0c72c53346c4700590fa074dcf"
+api_key = "##############"
 url = f"https://puckpedia.com/api/players2?api_key={api_key}"
 
 ##
