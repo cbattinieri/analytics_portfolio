@@ -1,0 +1,911 @@
+---
+title: "Player Point Projections"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-01-07"
+---
+
+```{r packages, include = FALSE}
+.libPaths("C:/Users/cbatti545@cable.comcast.com/OneDrive - Comcast/Documents_old/R/R-4.1.3/library")
+
+library(hockeyR)
+library(fastRhockey)
+library(tidyverse)
+library(nhlapi)
+library(data.table)
+library(lubridate)
+library(readr)
+library(stats)
+library(tidymodels)
+library(ggplot2)
+library(ggpmisc)
+library(readxl)
+library(data.table)
+library(rjson)
+library(pacman)
+library(gt)
+library(stringi)
+library(stringr)
+library(fuzzyjoin)
+library(factoextra)
+library(rsample)
+library(tidyr)
+library(utils)
+#tinytex::install_tinytex()
+
+```
+
+```{r create new seasons, include = FALSE}
+
+####23-24 calc_ind function not working
+
+#pbp16_ <- load_pbp(2016,shift_events = TRUE)
+#pbp23_ <- load_pbp(2023,shift_events = TRUE)
+#pbp22_ <- load_pbp(2022,shift_events = TRUE)
+#pbp21_ <- load_pbp(2021,shift_events = TRUE)
+#pbp20_ <- load_pbp(2020,shift_events = TRUE)
+
+# pbp24_ <- load_pbp(2024,shift_events = TRUE) %>% 
+#   rowwise() %>% 
+#   mutate(xg=ifelse(event_type %in% c('SHOT', 'MISSED_SHOT', 'GOAL'),runif(n=1,min=0,max=1),NA)) %>%
+#   ungroup() %>% 
+#   relocate(xg, .before=event_type)
+# 
+# 
+# 
+#pbp16 <- calculate_individual(pbp16_, type = "R", game_strength = "5v5") %>%
+#  mutate(season_yr="2015-16")
+
+#pbp16 <- pbp16 %>%
+#   mutate(uniq_id=ifelse(grepl("Aho",player_name) & team=='New York Islanders','Sebastian.Aho2',player_name)) %>%
+#   mutate(uniq_id2=ifelse(uniq_id=='Sebastian.Aho.1','Sebastian.Aho',uniq_id))
+
+#write.csv(pbp16,"pbp16___.csv")
+
+# historical_ind_1 <- fread(file="test_bind.csv")
+
+#onice and ind join happens in pbp data manip -- need to redo data ingest from excel for new seasons
+
+# onice19 <- calculate_on_ice(pbp19_, type = "R", game_strength = "5v5") %>%
+#    mutate(season_yr="2018-19")
+
+```
+
+
+
+```{r load, include = FALSE}
+
+historical_ind <- fread(file="indstats1617_2223.csv")
+
+historical_pbp_ <- fread(file="onice1617_2223.csv")%>% 
+  mutate(uniq_id=ifelse(grepl("Aho",player_name) & team=='New York Islanders','Sebastian.Aho2',player_name)) %>% 
+  mutate(uniq_id2=ifelse(uniq_id=='Sebastian.Aho.1','Sebastian.Aho',uniq_id))
+
+skater_stats1 <- fread(file="skater_statsbind.csv")
+
+skater_stats1 <- skater_stats1%>%  
+  mutate(uniq_id=stri_trans_general(stri_trans_nfkd(gsub(' |-','.',skater_stats1$player)),"Latin-ASCII"),
+         pos=ifelse(position=='D','D','F')) %>% 
+  mutate(uniq_id2=ifelse(player=='Sebastian Aho' & pos=='D',paste0(uniq_id,"2"),uniq_id)) %>% 
+  distinct(player,season,age,position,uniq_id2)
+
+#relative_stats <- fread(file="relative_stats1617_2223.csv")
+
+result <- stringdist_left_join(historical_pbp_, skater_stats1, by = c("uniq_id2" = "uniq_id2", "season_yr"="season"), method = "jw", max_dist = 0.1) 
+
+result <- result %>% 
+  mutate(season_yr_=season) %>% 
+  separate(season_yr_, into =c("szn1","szn2")) %>% 
+  mutate(szn1=as.integer(szn1)) %>% 
+  arrange(desc(szn1)) %>% 
+  select(-szn1,-szn2)
+  
+  
+head(result)
+  
+```
+
+
+The cod belows is the process I took to wrangle the data into a df that would be used for the model. 'Result' is a resulting_df of queries from HockeyR
+```{r pbp manip,message=FALSE, warning=FALSE}
+
+#####strome brothers issue
+model_df_1 <- result %>% 
+  relocate(season:position, .after=player_name) %>% 
+  select(-V1,-team,-season_yr:-uniq_id2.y,-mean_toi,-toi) %>% 
+  filter(gp > 10 & position != 'D') %>% 
+  group_by(player_name,season) %>%   
+  filter(if(player_name=='Dylan.Strome')age==min(age) else
+    if(player_name=='Ryan.Strome')age==max(age) else
+    TRUE)
+
+
+model_df <- left_join(model_df_1,historical_ind, by= c("player_name"="player_name","season"="season_yr")) %>% 
+  select(-player_id.y:-gp.y,-toi_minutes.y,-mean_toi_minutes.y,-uniq_id,-uniq_id2,-mean_toi,-toi) %>% 
+  mutate(p_pg=points/gp.x,
+         ixg_pg=ixg/gp.x,
+         pri_pts_pg=points_primary/gp.x) %>% 
+  group_by(player_name) %>% 
+  filter(gp.x > 10 & position != 'D') %>%
+  relocate(goals:points,p_pg, .after=gp.x) %>%
+  mutate(p_pg_target=p_pg,
+         age_=age) %>% 
+  relocate(p_pg_target, .before=p_pg) %>% 
+  ungroup() %>% 
+  group_by(player_name, season) %>% 
+  distinct(.) %>% 
+  ungroup() %>% 
+  select(-player_id.x) 
+
+two_szn_model_df <- model_df %>% 
+  group_by(player_name) %>% 
+  mutate(across(p_pg:age_, ~lead(., n = 1L), .names = "{.col}_prev1"),
+       across(p_pg:age_, ~lead(., n = 2L), .names = "{.col}_prev2"))%>%
+  rename_with(~ str_replace_all(., " ", "_"), everything()) %>%
+  rename_with(~ str_replace_all(., "%", "perc"), everything()) %>%
+  filter(player_name!='Sebastian.Aho')%>% 
+  na.omit(.)%>%
+    select(-p_pg:-age_) %>% 
+  ungroup() %>% 
+  filter(p_pg_target != 0 & p_pg_target < 0.8 & season != '2016-17' & player_name != 'Sidney.Crosby')
+
+###removes outliers and duplication
+
+```
+
+
+Model before splitting
+```{r EDA1, message=FALSE, warning=FALSE}
+##### EDA Scatter Plot all situations
+# correlation_ev <- ggplot(data=py_model_df, aes(x= 'CFperc_Rel_prev1', y=p_pg_target))+
+#   geom_jitter()+
+#   geom_smooth(method=lm, se=FALSE)
+# 
+# correlation_ev
+# 
+
+######stepwise
+# model_results_base <- lm(p_pg_target ~ . - player_name - season - position  - goals - assists - points - gp.x - V1_prev2 - V1_prev1, two_szn_model_df)
+# summary(model_results_base)
+
+model_results_v3 <- lm(p_pg_target ~  p_pg_prev1 + p_pg_prev2 + mean_toi_minutes.x_prev1 +
+                         icf_per60_prev1 + age__prev1 , data=two_szn_model_df)
+summary(model_results_v3)
+
+
+```
+
+
+Model during splitting process
+```{r train/test, echo = FALSE, message=FALSE, warning=FALSE}
+
+training_data <- two_szn_model_df %>% 
+  filter(season != '2018-19')
+
+testing_data <- two_szn_model_df %>% 
+  filter(season == '2018-19')
+
+
+trained_model <- lm(p_pg_target ~  p_pg_prev1 + p_pg_prev2 + mean_toi_minutes.x_prev1 + 
+                         icf_per60_prev1  + age__prev1 , data=training_data)
+summary(trained_model)
+
+training_resids <- residuals(trained_model)*82
+
+#training_resids
+
+```
+
+
+
+Model was fit on the 2018-19 season
+```{r test,message=FALSE, warning=FALSE}
+test_model <- lm(p_pg_target ~  p_pg_prev1 + p_pg_prev2 + mean_toi_minutes.x_prev1 + 
+                         icf_per60_prev1  + age__prev1 , data=testing_data)
+
+summary(test_model)
+
+fitted_model <- predict(trained_model, newdata = testing_data)
+
+summary(fitted_model)
+
+
+
+predictions <- testing_data %>% 
+  select(p_pg_target)%>% 
+  bind_cols(predict(trained_model, newdata=testing_data,interval="confidence"))
+
+
+predict_df <- data.frame(predictions) %>% 
+  mutate(residuals=(p_pg_target-fit)*82)
+
+predict_df$player <- testing_data$player_name
+predict_df$szn <- testing_data$season
+
+predicted_1819 <- predict_df %>% 
+  relocate(player, .before = p_pg_target) %>% 
+  relocate(szn, .before = p_pg_target) %>% 
+  mutate(residuals_82pace=round(abs(residuals),0))%>% 
+  mutate(buckets=cut(residuals_82pace, breaks=c(-1,5,10,15,20,25,30,50)),
+         targ_buckets=cut(p_pg_target, breaks=c(-1,.2,.4,.6,.7,1)))
+  
+
+perc_total_1819 <- predicted_1819 %>% 
+  group_by(buckets) %>% 
+  summarise(pct_total=round(n()/nrow(predicted_1819)*100,1))%>% 
+  mutate(szn=2019)
+
+
+
+write.csv(predicted_1819,"predictdf18_19.csv")
+
+```
+
+
+Model Evaluation
+```{r model eval, message=FALSE, warning=FALSE}
+
+fit_v_actual <- ggplot(data=predict_df, aes(x=fit*82,y=p_pg_target*82))+
+  geom_point()+
+  geom_smooth(method=lm, se=FALSE)
+
+fit_v_actual
+##############
+regression_corr <-
+  cor(two_szn_model_df[, c( "p_pg_prev1", "p_pg_prev2", "mean_toi_minutes.x_prev1", 
+                         "icf_per60_prev1", "age__prev1",  "points_primary_per60_prev1")])
+
+melted_regression_corr <- melt(regression_corr)
+
+ggplot(data = melted_regression_corr, aes(x = Var1,
+                                          y = Var2,
+                                          fill = value)) +
+  geom_tile() +
+  scale_fill_distiller(palette = "PuBu",
+                       direction = -1,
+                       limits = c(-1, +1)) +
+  geom_text(aes(x = Var1, y = Var2, label = round(value, 2)),
+            color = "black",
+            fontface = "bold",
+             size = 5) +
+  labs(title = "Multicollinearity Correlation Matrix") +
+  labs(fill = "Correlation \n Measure", x = "", y = "") +
+  theme(legend.background = element_rect(fill = "#F7F7F7"),
+        legend.key = element_rect(fill = "#F7F7F7"))
+
+
+#####shaprio test - W closer to 1 is normal residual dist, p value > .05 reject null hypothesis
+resids <- residuals(model_results_v3)
+
+shapiro_test <- shapiro.test(resids)
+
+print(shapiro_test)
+
+
+#####qqplot
+qqnorm(predict_df$residuals)
+
+
+#####homoscedasticity
+plot(predict_df$fit, predict_df$residuals/82, xlab = "Fitted values", ylab = "Residuals", main = "Residuals vs. Fitted")
+
+
+resid_ <-  ggplot(predict_df, aes(x = fit, y = (residuals/82))) +
+  geom_hline(yintercept = 0,
+             color = "black", linewidth = .7) +
+  stat_fit_deviations(linewidth = 1.75,
+                      color = 'blue') +
+  scale_x_continuous(breaks = scales::pretty_breaks(),
+                     labels = scales::comma_format()) +
+  scale_y_continuous(breaks = scales::pretty_breaks()) +
+  labs(title = "**Multiple Linear Regression Model: 2022**") +
+  xlab("Fitted Values") +
+  ylab("Residual Values") +
+  theme(panel.grid.minor.y = element_line(color = "#d0d0d0"))
+
+resid_
+
+```
+
+
+This 
+```{r aging assumptions, message=FALSE, warning=FALSE}
+#######test yoy change by age and quartile used to determine assumtptions of OTOI and iCF
+
+age_buckets_test <- two_szn_model_df %>% 
+  select(player_name, age__prev1, p_pg_prev1, p_pg_prev2, mean_toi_minutes.x_prev1, icf_per60_prev1
+         ,mean_toi_minutes.x_prev2, icf_per60_prev2) %>% 
+  mutate(age_bucket=ifelse(age__prev1>=30,"30+",
+                           ifelse(age__prev1>=27,"27-29",
+                                  ifelse(age__prev1<=26,"26u",NA)))) %>% 
+  group_by(age_bucket) %>%
+  mutate(quartile = ntile(p_pg_prev1, 4)) %>% 
+  ungroup() %>% 
+  group_by(age_bucket, quartile) %>% 
+         summarise(avg_pts_delta=mean(p_pg_prev1-p_pg_prev2),
+            avg_toi_delta=mean(mean_toi_minutes.x_prev1-mean_toi_minutes.x_prev2),
+            avg_icf_delta=mean(icf_per60_prev1-icf_per60_prev2)) %>% 
+  ungroup() %>% 
+  mutate(id=paste0(age_bucket,"_",quartile))
+```
+
+
+```{r test szn +1}
+
+
+###using assumptions for TOI and ICF
+szn19_20 <- two_szn_model_df %>% 
+  filter(season=='2018-19') %>% 
+  mutate(age=age+1, 
+         p_pg_prev2new=p_pg_prev1
+         ) %>% 
+  select(player_name, season, age , p_pg_prev2new,
+          mean_toi_minutes.x_prev1, icf_per60_prev1, age__prev1) %>% 
+  mutate(age__prev1=age__prev1+1,
+         season='2019-20',
+         age_bucket=ifelse(age__prev1>=30,"30+",
+                           ifelse(age__prev1>=27,"27-29",
+                                  ifelse(age__prev1<=26,"26u",NA)))) %>% 
+  left_join(predict_df, by=c("player_name"="player")) %>% 
+  select(-szn,-p_pg_target,-lwr:-residuals) %>% 
+  relocate(fit, .before =p_pg_prev2new ) %>% 
+  rename(p_pg_prev1=fit,
+         p_pg_prev2=p_pg_prev2new) %>% 
+  group_by(age_bucket) %>%
+  mutate(quartile = ntile(p_pg_prev1, 4)) %>% 
+  ungroup() %>% 
+  mutate(id=paste0(age_bucket,"_",quartile),
+  pts_delta=age_buckets_test$avg_pts_delta[match(id,age_buckets_test$id)],
+  toi_delta=age_buckets_test$avg_toi_delta[match(id,age_buckets_test$id)],
+  icf_delta=age_buckets_test$avg_icf_delta[match(id,age_buckets_test$id)])
+
+
+############creating model dataframe
+szn19_20_model <- szn19_20 %>% 
+  mutate(mean_toi_minutes.x_prev1=mean_toi_minutes.x_prev1*(1+
+          ifelse((age_bucket=="30+" & quartile %in% c(1,2,3)),-0.2,
+                           ifelse((age_bucket=="27-29"& quartile %in% c(2,3,4)),0.025,
+                                  ifelse(age_bucket=="26u",0.2,.01)))),
+         icf_per60_prev1=icf_per60_prev1*(1+icf_delta)) %>% 
+  select(-age_bucket:-icf_delta)
+
+
+ 
+#######re-fitting model
+
+fitted_model_1920 <- predict(trained_model, newdata = szn19_20_model) %>% 
+  bind_cols(predict(trained_model, newdata=szn19_20_model,interval="confidence"))
+
+predicted_1920 <- as.data.frame(fitted_model_1920)
+
+predicted_1920$player <- szn19_20_model$player_name
+
+predicted_1920 <- predicted_1920 %>% 
+  select(fit:player) %>% 
+  mutate(szn1='2019-20') %>% 
+  relocate(player:szn1, .before = fit) %>% 
+  left_join(model_df, by = c("player"="player_name", "szn1"="season")) %>% 
+  select(player:fit,p_pg_target) %>% 
+  mutate(residuals_=fit-p_pg_target,
+         residuals_82pace=round(abs((fit-p_pg_target)*82),0)) %>% 
+  na.omit(.)%>% 
+  mutate(buckets=cut(residuals_82pace, breaks=c(-1,5,10,15,20,25,30,50)),
+         targ_buckets=cut(p_pg_target, breaks=c(-1,.2,.4,.6,.7,1))) 
+  
+
+perc_total_1920 <- predicted_1920 %>% 
+  group_by(buckets) %>% 
+  summarise(pct_total=round(n()/nrow(predicted_1920)*100,1))%>% 
+  mutate(szn=2020)
+  
+  
+write.csv(predicted_1920,"predicted_1920.csv")
+
+```
+
+```{r szn+2}
+
+####use 18-19 players and filter down to only those that match in 19-20
+
+szn20_21 <- predicted_1920 %>% 
+  left_join(two_szn_model_df, by = c("player"="player_name", "szn1"="season")) %>% 
+  mutate(season='2019-20',player_name=player) %>% 
+  filter(season=='2019-20') %>% 
+  select(player_name,age,fit) %>% 
+  mutate(age=age+2,
+         p_pg_prev1new=fit) %>%
+  left_join(predicted_1819, by=c("player_name"='player'), suffix = c('','_old')) %>% 
+  select(-szn,-lwr:-residuals) %>% 
+  mutate(p_pg_prev2new=fit_old,
+    age__prev1=age-1,
+         season='2020-21',
+         age_bucket=ifelse(age__prev1>=30,"30+",
+                           ifelse(age__prev1>=27,"27-29",
+                                  ifelse(age__prev1<=26,"26u",NA)))) %>% 
+  rename(p_pg_prev1=p_pg_prev1new,
+         p_pg_prev2=p_pg_prev2new) %>% 
+  group_by(age_bucket) %>%
+  mutate(quartile = ntile(p_pg_prev1, 4)) %>% 
+  ungroup() %>% 
+  mutate(id=paste0(age_bucket,"_",quartile),
+  pts_delta=age_buckets_test$avg_pts_delta[match(id,age_buckets_test$id)],
+  toi_delta=age_buckets_test$avg_toi_delta[match(id,age_buckets_test$id)],
+  icf_delta=age_buckets_test$avg_icf_delta[match(id,age_buckets_test$id)])
+
+########
+szn20_21_model <- szn20_21 %>% 
+  left_join(szn19_20,by=c("player_name"), suffix = c('','_old')) %>% 
+  mutate(mean_toi_minutes.x_prev1=mean_toi_minutes.x_prev1*(1+
+          ifelse((age_bucket=="30+" & quartile %in% c(1,2,3)),-0.2,
+                           ifelse((age_bucket=="27-29"& quartile %in% c(2,3,4)),0.025,
+                                  ifelse(age_bucket=="26u",0.2,.01)))),
+         icf_per60_prev1=icf_per60_prev1*(1+icf_delta)) %>% 
+  select(-age_bucket:-icf_delta) %>% 
+  select(player_name,season,p_pg_prev1,p_pg_prev2,mean_toi_minutes.x_prev1,icf_per60_prev1,age__prev1)
+
+##########
+fitted_model_2021 <- predict(trained_model, newdata = szn20_21_model) %>% 
+  bind_cols(predict(trained_model, newdata=szn20_21_model,interval="confidence"))
+
+predicted_2021 <- as.data.frame(fitted_model_2021)
+
+predicted_2021$player <- szn20_21_model$player_name
+
+predicted_2021 <- predicted_2021 %>% 
+  select(fit:player) %>% 
+  relocate(player, .before = fit) 
+
+predicted_2021 <- predicted_2021 %>% 
+  select(fit:player) %>% 
+  mutate(szn1='2020-21') %>% 
+  relocate(player:szn1, .before = fit) %>% 
+  left_join(model_df, by = c("player"="player_name", "szn1"="season")) %>% 
+  select(player:fit,p_pg_target) %>% 
+ mutate(residuals_=fit-p_pg_target,
+         residuals_82pace=round(abs((fit-p_pg_target)*82),0)) %>% 
+  na.omit(.)%>% 
+  mutate(buckets=cut(residuals_82pace, breaks=c(-1,5,10,15,20,25,30,50)),
+         targ_buckets=cut(p_pg_target, breaks=c(-1,.2,.4,.6,.7,1))) 
+  
+
+perc_total_2021 <- predicted_2021 %>% 
+  group_by(buckets) %>% 
+  summarise(pct_total=round(n()/nrow(predicted_2021)*100,1))%>% 
+  mutate(szn=2021)
+  
+write.csv(predicted_2021,"predicted_2021.csv")
+
+```
+
+```{r szn+3}
+
+szn21_22 <- predicted_2021 %>% 
+  left_join(two_szn_model_df, by = c("player"="player_name", "szn1"="season")) %>% 
+  mutate(season='2020-21',player_name=player) %>% 
+  filter(season=='2020-21') %>% 
+  select(player_name,age,fit) %>% 
+  mutate(age=age+2,
+         p_pg_prev1new=fit) %>%
+  left_join(predicted_1920, by=c("player_name"='player'), suffix = c('','_old'))%>% 
+  #select(-lwr:-residuals) %>% 
+  mutate(p_pg_prev2new=fit_old,
+    age__prev1=age-1,
+         season='2021-22',
+         age_bucket=ifelse(age__prev1>=30,"30+",
+                           ifelse(age__prev1>=27,"27-29",
+                                  ifelse(age__prev1<=26,"26u",NA)))) %>% 
+  rename(p_pg_prev1=p_pg_prev1new,
+         p_pg_prev2=p_pg_prev2new) %>% 
+  group_by(age_bucket) %>%
+  mutate(quartile = ntile(p_pg_prev1, 4)) %>% 
+  ungroup() %>% 
+  mutate(id=paste0(age_bucket,"_",quartile),
+  pts_delta=age_buckets_test$avg_pts_delta[match(id,age_buckets_test$id)],
+  toi_delta=age_buckets_test$avg_toi_delta[match(id,age_buckets_test$id)],
+  icf_delta=age_buckets_test$avg_icf_delta[match(id,age_buckets_test$id)])
+
+########
+szn21_22_model <- szn21_22 %>% 
+  left_join(szn20_21_model,by=c("player_name"), suffix = c('','_old')) %>% 
+  mutate(mean_toi_minutes.x_prev1=mean_toi_minutes.x_prev1*(1+
+          ifelse((age_bucket=="30+" & quartile %in% c(1,2,3)),-0.2,
+                           ifelse((age_bucket=="27-29"& quartile %in% c(2,3,4)),0.025,
+                                  ifelse(age_bucket=="26u",0.2,.01)))),
+         icf_per60_prev1=icf_per60_prev1*(1+icf_delta)) %>% 
+  select(-age_bucket:-icf_delta) %>% 
+  select(player_name,season,p_pg_prev1,p_pg_prev2,mean_toi_minutes.x_prev1,icf_per60_prev1,age__prev1)
+
+##########
+fitted_model_2122 <- predict(trained_model, newdata = szn21_22_model) %>% 
+  bind_cols(predict(trained_model, newdata=szn21_22_model,interval="confidence"))
+
+predicted_2122 <- as.data.frame(fitted_model_2122)
+
+predicted_2122$player <- szn21_22_model$player_name
+
+predicted_2122 <- predicted_2122 %>% 
+  select(fit:player) %>% 
+  relocate(player, .before = fit) 
+
+predicted_2122 <- predicted_2122 %>% 
+  select(fit:player) %>% 
+  mutate(szn1='2021-22') %>% 
+  relocate(player:szn1, .before = fit) %>% 
+  left_join(model_df, by = c("player"="player_name", "szn1"="season")) %>% 
+  select(player:fit,p_pg_target) %>% 
+  mutate(residuals_=fit-p_pg_target,
+         residuals_82pace=round(abs((fit-p_pg_target)*82),0)) %>% 
+  na.omit(.) %>% 
+  mutate(buckets=cut(residuals_82pace, breaks=c(-1,5,10,15,20,25,30,50)),
+         targ_buckets=cut(p_pg_target, breaks=c(-1,.2,.4,.6,.7,1))) 
+
+perc_total_2122 <- predicted_2122 %>% 
+  group_by(buckets) %>% 
+  summarise(pct_total=round(n()/nrow(predicted_2122)*100,1)) %>% 
+  mutate(szn=2022)
+  
+  
+#write.csv(predicted_2122,"predicted_2122.csv")
+
+```
+
+
+```{r szn+4}
+# szn22_23 <- predicted_2122 %>% 
+#   left_join(two_szn_model_df, by = c("player"="player_name", "szn1"="season")) %>% 
+#   mutate(season='2021-22',player_name=player) %>% 
+#   filter(season=='2021-22') %>% 
+#   select(player_name,age,fit) %>% 
+#   mutate(age=age+2,
+#          p_pg_prev1new=fit) %>%
+#   left_join(predicted_2021, by=c("player_name"='player'), suffix = c('','_old'))%>% 
+#   #select(-lwr:-residuals) %>% 
+#   mutate(p_pg_prev2new=fit_old,
+#     age__prev1=age-1,
+#          season='2022-23',
+#          age_bucket=ifelse(age__prev1>=30,"30+",
+#                            ifelse(age__prev1>=27,"27-29",
+#                                   ifelse(age__prev1<=26,"26u",NA)))) %>% 
+#   rename(p_pg_prev1=p_pg_prev1new,
+#          p_pg_prev2=p_pg_prev2new) %>% 
+#   group_by(age_bucket) %>%
+#   mutate(quartile = ntile(p_pg_prev1, 4)) %>% 
+#   ungroup() %>% 
+#   mutate(id=paste0(age_bucket,"_",quartile),
+#   pts_delta=age_buckets_test$avg_pts_delta[match(id,age_buckets_test$id)],
+#   toi_delta=age_buckets_test$avg_toi_delta[match(id,age_buckets_test$id)],
+#   icf_delta=age_buckets_test$avg_icf_delta[match(id,age_buckets_test$id)])
+# 
+# ########
+# szn21_22_model <- szn21_22 %>% 
+#   left_join(szn20_21_model,by=c("player_name"), suffix = c('','_old')) %>% 
+#   mutate(mean_toi_minutes.x_prev1=mean_toi_minutes.x_prev1*(1+
+#           ifelse((age_bucket=="30+" & quartile %in% c(1,2,3)),-0.2,
+#                            ifelse((age_bucket=="27-29"& quartile %in% c(2,3,4)),0.025,
+#                                   ifelse(age_bucket=="26u",0.2,.01)))),
+#          icf_per60_prev1=icf_per60_prev1*(1+icf_delta)) %>% 
+#   select(-age_bucket:-icf_delta) %>% 
+#   select(player_name,season,p_pg_prev1,p_pg_prev2,mean_toi_minutes.x_prev1,icf_per60_prev1,age__prev1)
+# 
+# ##########
+# fitted_model_2122 <- predict(trained_model, newdata = szn21_22_model) %>% 
+#   bind_cols(predict(trained_model, newdata=szn21_22_model,interval="confidence"))
+# 
+# predicted_2122 <- as.data.frame(fitted_model_2122)
+# 
+# predicted_2122$player <- szn21_22_model$player_name
+# 
+# predicted_2122 <- predicted_2122 %>% 
+#   select(fit:player) %>% 
+#   relocate(player, .before = fit) 
+# 
+# predicted_2122 <- predicted_2122 %>% 
+#   select(fit:player) %>% 
+#   mutate(szn1='2021-22') %>% 
+#   relocate(player:szn1, .before = fit) %>% 
+#   left_join(model_df, by = c("player"="player_name", "szn1"="season")) %>% 
+#   select(player:fit,p_pg_target) %>% 
+#   mutate(residuals_=fit-p_pg_target,
+#          residuals_82pace=round(abs((fit-p_pg_target)*82),0)) %>% 
+#   na.omit(.) %>% 
+#   mutate(buckets=cut(residuals_82pace, breaks=c(-1,5,10,15,20,25,30,50))) 
+# 
+# perc_total_2122 <- predicted_2122 %>% 
+#   group_by(buckets) %>% 
+#   summarise(pct_total=round(n()/nrow(predicted_2122)*100,1))
+#   
+#   
+# write.csv(predicted_2122,"predicted_2122.csv")
+```
+
+
+
+```{r aggregations}
+##szn0 will be 'next season'
+
+
+resid_bind <- rbind(perc_total_1819,perc_total_1920,perc_total_2021,perc_total_2122)
+
+
+ggplot(resid_bind, aes(x=szn, y=pct_total, group = buckets))+
+  geom_line(aes(color=buckets),size=1.25)+
+  labs(title="Prediction Projections (Residuals)", x='Season', y='% of Total by Season')+
+  theme(legend.position = "bottom")+
+scale_color_brewer(palette="PuOr")+
+    geom_vline(xintercept=2020,color="white",size=1.25,)+
+  annotate("text", x=2019.95, y=20, label="Started using YOY assumptions", angle=90, color='white')+
+  theme_bw()+
+  guides(color = guide_legend(title=''))+
+  theme(text=element_text(color = 'white'),
+            # Changes panel, plot and legend background to dark gray:
+            panel.background = element_rect(fill = '#2E3031'),
+            plot.background = element_rect(fill = '#2E3031'),
+            legend.background = element_rect(fill='#2E3031'),
+            legend.key = element_rect(fill = '#2E3031'),
+            # Changes legend texts color to white:
+            legend.text =  element_text(colour = 'white'),
+            legend.title = element_text(colour = 'white'),
+            # Changes color of plot border to white:
+            panel.border = element_rect(color = 'white'),
+            # Eliminates grids:
+            panel.grid.minor = element_blank(),
+            panel.grid.major = element_blank(),
+            # Changes color of axis texts to white
+            axis.text.x = element_text(colour = 'white'),
+            axis.text.y = element_text(colour = 'white'),
+            axis.title.x = element_text(colour= 'white'),
+            axis.title.y = element_text(colour= 'white'),
+            # Changes axis ticks color to white
+            axis.ticks.y = element_line(color = 'white'),
+            axis.ticks.x = element_line(color = 'white'),
+            legend.position = "bottom")+ 
+guides(color = guide_legend(nrow = 1), label="Residuals")
+
+# agg_test <- two_szn_model_df %>% 
+#   filter(season=='2022-23') %>% 
+#   select(player_name,position,age) %>% 
+#   mutate(szn0_fit=predict_df$fit[match(predict_df$player,player_name)],
+#          szn1_fit=predicted_2324$fit[match(predicted_2324$player,player_name)],
+#          szn2_fit=predicted_2425$fit[match(predicted_2425$player,player_name)],
+#          szn3_fit=predicted_2526$fit[match(predicted_2526$player,player_name)]) %>% 
+#   rename('szn0_age(jul_1)'=age) %>% 
+#   mutate(across(where(is.numeric),~round(.,2)))
+  
+
+
+```
+
+
+```{r model eval_, warning=FALSE,message=FALSE}
+ggplot(predicted_1819,aes(x=buckets))+
+  geom_histogram(stat = 'count',color='white',fill='#CC5500')+
+   labs(title="18-19 Season",
+       x="Predicted Points Residuals (82 game pace)")+
+   geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, binwidth = 1, color='white')+
+  theme_bw()+
+  guides(color = guide_legend(title=''))+
+  theme(text=element_text(color = 'white'),
+            # Changes panel, plot and legend background to dark gray:
+            panel.background = element_rect(fill = '#2E3031'),
+            plot.background = element_rect(fill = '#2E3031'),
+            legend.background = element_rect(fill='#2E3031'),
+            legend.key = element_rect(fill = '#2E3031'),
+            # Changes legend texts color to white:
+            legend.text =  element_text(colour = 'white'),
+            legend.title = element_text(colour = 'white'),
+            # Changes color of plot border to white:
+            panel.border = element_rect(color = 'white'),
+            # Eliminates grids:
+            panel.grid.minor = element_blank(),
+            panel.grid.major = element_blank(),
+            # Changes color of axis texts to white
+            axis.text.x = element_text(colour = 'white'),
+            axis.text.y = element_text(colour = 'white'),
+            axis.title.x = element_text(colour= 'white'),
+            axis.title.y = element_text(colour= 'white'),
+            # Changes axis ticks color to white
+            axis.ticks.y = element_line(color = 'white'),
+            axis.ticks.x = element_line(color = 'white'),
+            legend.position = "bottom")+ 
+guides(color = guide_legend(nrow = 1), label="Residuals") 
+
+ggplot(predicted_1819,aes(x=buckets,fill=targ_buckets))+
+  geom_histogram(stat = 'count',color='white')+
+   labs(title="18-19 Season",
+       x="Predicted Points Residuals (82 game pace)")+
+   #geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, binwidth = 1, color='white')+
+  theme_bw()+
+  guides(color = guide_legend(title=''))+
+  theme(text=element_text(color = 'white'),
+            # Changes panel, plot and legend background to dark gray:
+            panel.background = element_rect(fill = '#2E3031'),
+            plot.background = element_rect(fill = '#2E3031'),
+            legend.background = element_rect(fill='#2E3031'),
+            legend.key = element_rect(fill = '#2E3031'),
+            # Changes legend texts color to white:
+            legend.text =  element_text(colour = 'white'),
+            legend.title = element_text(colour = 'white'),
+            # Changes color of plot border to white:
+            panel.border = element_rect(color = 'white'),
+            # Eliminates grids:
+            panel.grid.minor = element_blank(),
+            panel.grid.major = element_blank(),
+            # Changes color of axis texts to white
+            axis.text.x = element_text(colour = 'white'),
+            axis.text.y = element_text(colour = 'white'),
+            axis.title.x = element_text(colour= 'white'),
+            axis.title.y = element_text(colour= 'white'),
+            # Changes axis ticks color to white
+            axis.ticks.y = element_line(color = 'white'),
+            axis.ticks.x = element_line(color = 'white'),
+            legend.position = "bottom")+ 
+guides(color = guide_legend(nrow = 1), label="Residuals") 
+
+
+ggplot(predicted_1920,aes(x=buckets))+
+   geom_histogram(stat = 'count',fill='#CC5500',color='white')+
+  labs(title="19-20 Season",
+       x="Predicted Points Residuals (82 game pace)")+
+   geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, binwidth = 1, color='white')+
+  theme_bw()+
+  theme_bw()+
+  guides(color = guide_legend(title=''))+
+  theme(text=element_text(color = 'white'),
+            # Changes panel, plot and legend background to dark gray:
+            panel.background = element_rect(fill = '#2E3031'),
+            plot.background = element_rect(fill = '#2E3031'),
+            legend.background = element_rect(fill='#2E3031'),
+            legend.key = element_rect(fill = '#2E3031'),
+            # Changes legend texts color to white:
+            legend.text =  element_text(colour = 'white'),
+            legend.title = element_text(colour = 'white'),
+            # Changes color of plot border to white:
+            panel.border = element_rect(color = 'white'),
+            # Eliminates grids:
+            panel.grid.minor = element_blank(),
+            panel.grid.major = element_blank(),
+            # Changes color of axis texts to white
+            axis.text.x = element_text(colour = 'white'),
+            axis.text.y = element_text(colour = 'white'),
+            axis.title.x = element_text(colour= 'white'),
+            axis.title.y = element_text(colour= 'white'),
+            # Changes axis ticks color to white
+            axis.ticks.y = element_line(color = 'white'),
+            axis.ticks.x = element_line(color = 'white'),
+            legend.position = "bottom")+ 
+guides(color = guide_legend(nrow = 1), label="Residuals")  
+
+ggplot(predicted_1920,aes(x=buckets,fill=targ_buckets))+
+  geom_histogram(stat = 'count',color='white')+
+   labs(title="19-20 Season",
+       x="Predicted Points Residuals (82 game pace)")+
+   #geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, binwidth = 1, color='white')+
+  theme_bw()+
+  guides(color = guide_legend(title=''))+
+  theme(text=element_text(color = 'white'),
+            # Changes panel, plot and legend background to dark gray:
+            panel.background = element_rect(fill = '#2E3031'),
+            plot.background = element_rect(fill = '#2E3031'),
+            legend.background = element_rect(fill='#2E3031'),
+            legend.key = element_rect(fill = '#2E3031'),
+            # Changes legend texts color to white:
+            legend.text =  element_text(colour = 'white'),
+            legend.title = element_text(colour = 'white'),
+            # Changes color of plot border to white:
+            panel.border = element_rect(color = 'white'),
+            # Eliminates grids:
+            panel.grid.minor = element_blank(),
+            panel.grid.major = element_blank(),
+            # Changes color of axis texts to white
+            axis.text.x = element_text(colour = 'white'),
+            axis.text.y = element_text(colour = 'white'),
+            axis.title.x = element_text(colour= 'white'),
+            axis.title.y = element_text(colour= 'white'),
+            # Changes axis ticks color to white
+            axis.ticks.y = element_line(color = 'white'),
+            axis.ticks.x = element_line(color = 'white'),
+            legend.position = "bottom")+ 
+guides(color = guide_legend(nrow = 1), label="Residuals")
+
+
+ggplot(predicted_2021,aes(x=buckets))+
+   geom_histogram(stat = 'count',fill='#CC5500',color='white')+
+  labs(title="20-21 Season",
+       x="Predicted Points Residuals (82 game pace)")+
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, binwidth = 1, color='white')+
+  theme_bw()+
+  theme_bw()+
+  guides(color = guide_legend(title=''))+
+  theme(text=element_text(color = 'white'),
+            # Changes panel, plot and legend background to dark gray:
+            panel.background = element_rect(fill = '#2E3031'),
+            plot.background = element_rect(fill = '#2E3031'),
+            legend.background = element_rect(fill='#2E3031'),
+            legend.key = element_rect(fill = '#2E3031'),
+            # Changes legend texts color to white:
+            legend.text =  element_text(colour = 'white'),
+            legend.title = element_text(colour = 'white'),
+            # Changes color of plot border to white:
+            panel.border = element_rect(color = 'white'),
+            # Eliminates grids:
+            panel.grid.minor = element_blank(),
+            panel.grid.major = element_blank(),
+            # Changes color of axis texts to white
+            axis.text.x = element_text(colour = 'white'),
+            axis.text.y = element_text(colour = 'white'),
+            axis.title.x = element_text(colour= 'white'),
+            axis.title.y = element_text(colour= 'white'),
+            # Changes axis ticks color to white
+            axis.ticks.y = element_line(color = 'white'),
+            axis.ticks.x = element_line(color = 'white'),
+            legend.position = "bottom")+ 
+guides(color = guide_legend(nrow = 1), label="Residuals")  
+
+ggplot(predicted_2021,aes(x=buckets,fill=targ_buckets))+
+  geom_histogram(stat = 'count',color='white')+
+   labs(title="20-21 Season",
+       x="Predicted Points Residuals (82 game pace)")+
+   #geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, binwidth = 1, color='white')+
+  theme_bw()+
+  guides(color = guide_legend(title=''))+
+  theme(text=element_text(color = 'white'),
+            # Changes panel, plot and legend background to dark gray:
+            panel.background = element_rect(fill = '#2E3031'),
+            plot.background = element_rect(fill = '#2E3031'),
+            legend.background = element_rect(fill='#2E3031'),
+            legend.key = element_rect(fill = '#2E3031'),
+            # Changes legend texts color to white:
+            legend.text =  element_text(colour = 'white'),
+            legend.title = element_text(colour = 'white'),
+            # Changes color of plot border to white:
+            panel.border = element_rect(color = 'white'),
+            # Eliminates grids:
+            panel.grid.minor = element_blank(),
+            panel.grid.major = element_blank(),
+            # Changes color of axis texts to white
+            axis.text.x = element_text(colour = 'white'),
+            axis.text.y = element_text(colour = 'white'),
+            axis.title.x = element_text(colour= 'white'),
+            axis.title.y = element_text(colour= 'white'),
+            # Changes axis ticks color to white
+            axis.ticks.y = element_line(color = 'white'),
+            axis.ticks.x = element_line(color = 'white'),
+            legend.position = "bottom")+ 
+guides(color = guide_legend(nrow = 1), label="Residuals")
+
+
+ggplot(predicted_2122,aes(x=buckets))+
+   geom_histogram(stat = 'count',fill='#CC5500',color='white')+
+  labs(title="21-22 Season",
+       x="Predicted Points Residuals (82 game pace)")+
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, binwidth = 1, color='white')+
+  theme_bw()+
+  theme_bw()+
+  guides(color = guide_legend(title=''))+
+  theme(text=element_text(color = 'white'),
+            # Changes panel, plot and legend background to dark gray:
+            panel.background = element_rect(fill = '#2E3031'),
+            plot.background = element_rect(fill = '#2E3031'),
+            legend.background = element_rect(fill='#2E3031'),
+            legend.key = element_rect(fill = '#2E3031'),
+            # Changes legend texts color to white:
+            legend.text =  element_text(colour = 'white'),
+            legend.title = element_text(colour = 'white'),
+            # Changes color of plot border to white:
+            panel.border = element_rect(color = 'white'),
+            # Eliminates grids:
+            panel.grid.minor = element_blank(),
+            panel.grid.major = element_blank(),
+            # Changes color of axis texts to white
+            axis.text.x = element_text(colour = 'white'),
+            axis.text.y = element_text(colour = 'white'),
+            axis.title.x = element_text(colour= 'white'),
+            axis.title.y = element_text(colour= 'white'),
+            # Changes axis ticks color to white
+            axis.ticks.y = element_line(color = 'white'),
+            axis.ticks.x = element_line(color = 'white'),
+            legend.position = "bottom")+ 
+guides(color = guide_legend(nrow = 1), label="Residuals")  
+
+```
