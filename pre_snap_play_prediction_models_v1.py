@@ -436,7 +436,7 @@ n_features=X_refit.shape[1]
 #####################
 #####################
 #####################
-##gradient boost gridseatch
+##gradient boost gridsearch
 gb_clf=GradientBoostingClassifier(random_state=13)
 
 parameters = {
@@ -483,7 +483,7 @@ plt.show()
 
 
 
-# ##### insert orc_auc cuver
+# ##### insert roc_auc curve
 # ##train
 # y_scoreT=gb_clf_best.predict_proba(X_train)[:,1]
 # fprT,tprT,_=roc_curve(y_train,y_scoreT)
