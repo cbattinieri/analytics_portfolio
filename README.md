@@ -1,7 +1,8 @@
 # Analytics Portfolio
 ## Portfolio including research, modeling, and applications through the lens of sports
 
-- NHL Game Level Point Prediction: XGBoost Model to predict if a player will score a point in a game- will be combined with historical odds to create Expected Value Bets  
+- NHL Game Level Point Prediction: XGBoost Model to predict if a player will score a point in a game- will be combined with historical odds to create Expected Value Bets
+- Monte Carlo: Model to help understand and predict loan default and portfolio loss in those defaulted loans  
 - Play Prediction Model: Leverages ML classification models to predict football plays based on pre-snap attributes only
 - NHL Contracts Comparables Tool: Shiny App that leverages an unsupervised knn model to create a tool for agents & front offices (https://cbatt.shinyapps.io/contract_comps_tool/)
 - NHL Points Prediction Model: Iterative linear regression models that use future feature assumptions to predict NHL players career trajectory
